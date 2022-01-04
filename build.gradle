@@ -1,0 +1,380 @@
+import org.xml.sax.SAXException
+import org.xml.sax.helpers.DefaultHandler
+
+import javax.xml.parsers.SAXParser
+import javax.xml.parsers.SAXParserFactory
+import java.text.DecimalFormat
+import java.util.function.Consumer
+import java.util.zip.ZipEntry
+import java.util.zip.ZipFile
+import java.util.zip.ZipInputStream
+
+// Top-level build file where you can add configuration options common to all sub-projects/modules.
+plugins {
+    id 'com.android.application' version '7.1.0-beta05' apply false
+    id 'com.android.library' version '7.1.0-beta05' apply false
+    id 'org.jetbrains.kotlin.android' version '1.6.10' apply false
+}
+
+task clean(type: Delete) {
+    delete rootProject.buildDir
+}
+
+File preVersionApk = new File("/Users/youngjoe/Downloads/target/1637659262-smartsecurityworkbench1.5.1r15_full.apk")
+File targetVersionApk = new File("/Users/youngjoe/Downloads/target/1639993627-smartsecurityworkbench1.5.5r16_full.apk")
+task compareTuyaApk {
+    ApkInfo targetApkInfo = parseApk(targetVersionApk)
+    ApkInfo preApkInfo = parseApk(preVersionApk)
+
+    StringBuilder sb = new StringBuilder()
+
+    sb.append("相比${preVersionApk.name}版本")
+    appendChangeInfo(sb, targetApkInfo, preApkInfo)
+    sb.append("其中:")
+    sb.append("\n")
+
+    appendApkChangeInfo(sb, targetApkInfo.assetInfo, preApkInfo.assetInfo, false)
+    appendApkChangeInfo(sb, targetApkInfo.libInfo, preApkInfo.libInfo, true)
+    appendApkChangeInfo(sb, targetApkInfo.resInfo, preApkInfo.resInfo, false)
+    appendApkChangeInfo(sb, targetApkInfo.dexInfo, preApkInfo.dexInfo, false)
+    sb.append("\n")
+    appendPmsChangeInfo(sb, targetApkInfo.pmsList, preApkInfo.pmsList)
+
+    println("sb:" + sb.toString())
+
+}
+
+private void appendPmsChangeInfo(StringBuilder sb, Set<String> targetPmsList, Set<String> prePmsList){
+    sb.append("----------------权限-Start-------------------------")
+    sb.append("\n")
+    Iterator<String> targetIterator = targetPmsList.iterator()
+    while (targetIterator.hasNext()) {
+        String targetItem = targetIterator.next()
+        String prePms = null
+        for (String preItem : prePmsList) {
+            if (preItem.equals(targetItem)) {
+                prePms = preItem
+                break
+            }
+        }
+
+        if (prePms != null) {
+            targetIterator.remove()
+            prePmsList.remove(prePms)
+        }
+    }
+
+    appendPmsChangeResult(sb, targetPmsList, "请注意，新增了权限:")
+    appendPmsChangeResult(sb, prePmsList, "删减了权限:")
+    if (targetPmsList.isEmpty() && prePmsList.isEmpty()) {
+        sb.append("无权限变更")
+        sb.append("\n")
+    }
+    sb.append("----------------权限-End-------------------------")
+}
+
+private void appendPmsChangeResult(StringBuilder sb, Set<String> pmsList, String changeHint) {
+    if (!pmsList.isEmpty()) {
+        sb.append(changeHint)
+        sb.append("\n")
+        pmsList.forEach(new Consumer<String>() {
+            @Override
+            void accept(String pms) {
+                sb.append(pms)
+                sb.append("\n")
+            }
+        })
+    }
+}
+
+private void appendApkChangeInfo(StringBuilder sb, FileInfo targetFile, FileInfo preFile, boolean openChildChangeDetail) {
+    sb.append("----------------${targetFile.name}-Start-------------------------")
+    sb.append("\n")
+//    sb.append("${targetFile.name}")
+    appendChangeInfo(sb, targetFile, preFile)
+    sb.append("其中:")
+    sb.append("\n")
+    collectChangeInfo(sb, targetFile, preFile, openChildChangeDetail)
+    sb.append("----------------${targetFile.name}-End-------------------------")
+    sb.append("\n")
+}
+
+void appendChangeInfo(StringBuilder sb, FileInfo targetFile, FileInfo preFile) {
+    long sizeChange = targetFile.size - preFile.size
+    if (sizeChange == 0) {
+        return
+    }
+    sb.append("${targetFile.name}")
+    if (sizeChange > 0) {
+        sb.append(" 增加 ")
+    } else {
+        sb.append(" 减少 ")
+    }
+    sb.append(setFileSize(Math.abs(sizeChange)))
+    sb.append("\n")
+}
+
+/**
+ *
+ * @param sb
+ * @param targetInfo
+ * @param preInfo
+ * @param openChildChangeDetail 只有lib 为true
+ */
+void collectChangeInfo(StringBuilder sb, FileInfo targetInfo, FileInfo preInfo, boolean openChildChangeDetail) {
+    Iterator<FileInfo> targetIterator = targetInfo.childFileInfos.iterator()
+    while (targetIterator.hasNext()) {
+        FileInfo targetItem = targetIterator.next()
+        FileInfo preNameInfo = null
+        for (FileInfo preItem: preInfo.childFileInfos) {
+            if (preItem.name.equals(targetItem.name)) {
+                preNameInfo = preItem
+
+                appendChangeInfo(sb, targetItem, preItem)
+                if (openChildChangeDetail && targetItem.isDirectory && preItem.isDirectory) {
+                    appendApkChangeInfo(sb, targetItem, preItem, openChildChangeDetail)
+                }
+                break
+            }
+        }
+
+        if (preNameInfo != null) {
+            preInfo.childFileInfos.remove(preNameInfo)
+            targetIterator.remove()
+        }
+
+    }
+
+    appendFileChangeResult(sb, targetInfo, "新增了:")
+    appendFileChangeResult(sb, preInfo, "去除了:")
+}
+
+private void appendFileChangeResult(StringBuilder sb, FileInfo fileInfo, String changeHint) {
+    if (!fileInfo.childFileInfos.isEmpty()) {
+        sb.append(changeHint)
+        sb.append("\n")
+        fileInfo.childFileInfos.forEach(new Consumer<FileInfo>() {
+            @Override
+            void accept(FileInfo childFile) {
+                sb.append("${childFile.name} : ${setFileSize(childFile.size)}")
+                sb.append("\n")
+            }
+        })
+    }
+}
+
+private ApkInfo parseApk(File apkFile) {
+    File unzipFile = new File(apkFile.getParentFile(), apkFile.name.replace(".", "u"))
+    if (unzipFile.exists()) {
+        project.delete(unzipFile.absolutePath)
+    }
+    Process apkToolsTask = "java -jar apktool.jar d ${apkFile.absolutePath} -o ${unzipFile.absolutePath}".execute()
+    apkToolsTask.waitFor()
+    if (apkToolsTask.exitValue() != 0) {
+        println("error")
+        println("${apkToolsTask.errorStream.text}")
+        return null
+    }
+    println("decompile ${apkFile.name} success")
+
+    ApkInfo apkInfo = new ApkInfo()
+    apkInfo.name = apkFile.name
+    apkInfo.size = apkFile.length()
+
+    File manifestFile = new File(unzipFile, "AndroidManifest.xml")
+    SAXParserFactory spf = SAXParserFactory.newInstance()
+    SAXParser saxParser = spf.newSAXParser()
+    ManifestHandler handler = new ManifestHandler()
+    saxParser.parse(manifestFile, handler)
+    apkInfo.pmsList = handler.permissionS
+//    println("pms:" + handler.permissionS.toString())
+
+    File assetFile = new File(unzipFile, "assets")
+    apkInfo.assetInfo = collectFolderInfo(assetFile)
+//    println("assetFileSize:" + apkInfo.assetInfo.size)
+
+    File libFile = new File(unzipFile, "lib")
+    apkInfo.libInfo = collectFolderInfo(libFile)
+//    println("libFileSize:" + apkInfo.libInfo.size)
+
+    File resFile = new File(unzipFile, "res")
+    apkInfo.resInfo = collectFolderInfo(resFile)
+//    println("resFileSize:" + apkInfo.resInfo.size)
+
+    //解压apk
+    File unzipApkFile = new File(unzipFile.parentFile, "${apkInfo.name}-unzip")
+    if (unzipApkFile.exists()) {
+        project.delete(unzipApkFile.absolutePath)
+    }
+    decompressFile(unzipApkFile.absolutePath, apkFile.absolutePath)
+    apkInfo.dexInfo = collectDexInfo(unzipApkFile)
+
+    return apkInfo
+}
+
+class ManifestHandler extends DefaultHandler {
+
+    Set<String> permissionS = new HashSet<>()
+
+    @Override
+    void startElement(String uri, String localName, String qName, org.xml.sax.Attributes attributes) throws SAXException {
+        super.startElement(uri, localName, qName, attributes)
+        switch (qName) {
+            case "uses-permission":
+                String pms = attributes.getValue("android:name")
+                permissionS.add(pms)
+                break
+        }
+    }
+
+}
+
+/**
+ * 获取文件夹大小
+ *
+ * @param file File实例
+ * @return 文件夹大小（单位：字节）
+ * @throws Exception
+ */
+static long getFolderSize(File file)throws Exception{
+    long size = 0;
+    File[] fileList = file.listFiles();
+    if (fileList != null) {
+        for (File aFileList : fileList) {
+            if (aFileList.isDirectory()) {
+                size = size + getFolderSize(aFileList);
+            } else {
+                size = size + aFileList.length();
+            }
+        }
+    }
+    return size;
+}
+
+static String setFileSize(long size) {
+    DecimalFormat df = new DecimalFormat("###.##");
+    float f = ((float) size / (float) (1024 * 1024));
+    if (f < 1.0) {
+        float f2 = ((float) size / (float) (1024));
+        return df.format(new Float(f2).doubleValue()) + "KB";
+    } else {
+        return df.format(new Float(f).doubleValue()) + "M";
+    }
+}
+
+static FileInfo collectFolderInfo(File file) {
+    FileInfo folderInfo = new FileInfo()
+    folderInfo.name = file.name
+    folderInfo.isDirectory = file.isDirectory()
+    if (file.isDirectory()) {
+        folderInfo.size = getFolderSize(file)
+        folderInfo.childFileInfos = collectChileInfo(file)
+    } else {
+        folderInfo.size = file.length()
+    }
+    return folderInfo
+}
+
+/**
+ * 手机子目录下的文件信息
+ * @param file
+ * @return
+ */
+static List<FileInfo> collectChileInfo(File file) {
+    List<FileInfo> fileInfos = new ArrayList<>()
+    File[] fileList = file.listFiles()
+    if (fileList != null) {
+        for (File aFileList : fileList) {
+            FileInfo fileInfo = collectFolderInfo(aFileList)
+            fileInfos.add(fileInfo)
+//            println("name:" + fileInfo.name + " size: ${fileInfo.size}")
+        }
+    }
+    return fileInfos
+}
+
+static void decompressFile(String target, String source) {
+    try {
+        File file = new File(source);
+        if(!file.exists()) {
+            return;
+        }
+        ZipFile zipFile = new ZipFile(file);
+        ZipInputStream zipInputStream = new ZipInputStream(new FileInputStream(file));
+        ZipEntry zipEntry = null;
+        while ((zipEntry = zipInputStream.getNextEntry()) != null) {
+            String fileName = zipEntry.getName();
+            if(fileName != null && fileName.contains("__MACOSX/")) {
+                continue;
+            }
+            File temp = new File(target + File.separator + fileName);
+            if(zipEntry.isDirectory()) {
+                File dir = new File(target + File.separator + fileName);
+                dir.mkdirs();
+                continue;
+            }
+            if (temp.getParentFile() != null && !temp.getParentFile().exists()) {
+                temp.getParentFile().mkdirs();
+            }
+            byte[] buffer = new byte[1024];
+            OutputStream os = new FileOutputStream(temp);
+            // 通过ZipFile的getInputStream方法拿到具体的ZipEntry的输入流
+            InputStream is = zipFile.getInputStream(zipEntry);
+            int len = 0;
+            while ((len = is.read(buffer)) != -1) {
+                os.write(buffer, 0, len);
+            }
+            os.close();
+            is.close();
+        }
+        zipInputStream.close();
+    } catch (Exception e) {
+        e.printStackTrace();
+    }
+}
+
+static FileInfo collectDexInfo(File unzipApkFile) {
+    FileInfo dexInfo = new FileInfo()
+    dexInfo.name = "dex"
+    List<FileInfo> apkDexInfos = new ArrayList<>()
+    File[] fileList = unzipApkFile.listFiles()
+    long size = 0
+    for (File aFileList : fileList) {
+        if (getExtensionName(aFileList.name).equals("dex")) {
+            FileInfo dexItemInfo = new FileInfo()
+            dexItemInfo.name = aFileList.name
+            dexItemInfo.size = aFileList.length()
+            apkDexInfos.add(dexItemInfo)
+            size += dexItemInfo.size
+//            println("name:" + dexItemInfo.name + " size: ${dexItemInfo.size}")
+        }
+    }
+    dexInfo.size = size
+    dexInfo.childFileInfos = apkDexInfos
+    return dexInfo
+}
+
+static String getExtensionName(String filename) {
+    if ((filename != null) && (filename.length() > 0)) {
+        int dot = filename.lastIndexOf('.');
+        if ((dot >-1) && (dot < (filename.length() - 1))) {
+            return filename.substring(dot + 1);
+        }
+    }
+    return filename;
+}
+
+class ApkInfo extends FileInfo{
+    Set<String> pmsList
+    FileInfo libInfo
+    FileInfo assetInfo
+    FileInfo resInfo
+    FileInfo dexInfo
+}
+
+class FileInfo {
+    String name
+    long size
+    boolean isDirectory
+    List<FileInfo> childFileInfos
+}
